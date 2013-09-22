@@ -1,0 +1,700 @@
+#include <stdlib.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <assert.h>
+#include <sys/types.h>
+#include <stdint.h>
+#include <assert.h>
+//#include <spu_intrinsics.h>
+//#include <libspe2.h>
+#include <spu_mfcio.h>
+#include <setjmp.h>
+#include "tl_spu.h"
+
+//#include <cache-api.h>
+//#include "util.h"
+//#include "data.h"
+
+#define DEBUGON
+#define MULTIBUFFER
+
+/* Alignment macros */
+#define SPE_ALIGNMENT 16
+#define SPE_ALIGNMENT_FULL 128
+#define SPE_ALIGN __attribute__((aligned(16)))
+#define SPE_ALIGN_FULL __attribute__((aligned(128)))
+#define ROUND_UP_ALIGN(value, alignment)\
+ (((value) + ((alignment) - 1))&(~((alignment)-1)))
+/*End of alignment macros*/
+
+
+/*working on SPU MMap function.*/
+#define __ea                    /* ignored */
+#define mmap_func       mmap
+#define mmap_fail       MAP_FAILED
+
+#ifdef USE_CACHE
+/*BEGGINING OF CACHE DEFINITION*/
+#define CACHE_NAME              tlCache
+#define CACHED_TYPE             intptr_t
+#define CACHELINE_LOG2SIZE      10
+#define CACHE_LOG2NWAY          2
+#define CACHE_LOG2NSETS         5
+#define CACHE_TYPE              1
+#include <cache-api.h>
+#define LOAD(ea)                cache_rd (tlCache, (unsigned)(ea))
+#define STORE(ea, val)          cache_wr (tlCache, (unsigned)(ea), (val))
+#define CACHE_FLUSH()           cache_flush (tlCache)
+#define CACHE_PR_STATS()        cache_pr_stats (tlCache)
+/*END OF CACHE DEFINITION*/
+#endif
+
+
+
+//volatile control_block cb __attribute__ ((aligned (128)));
+unsigned int tag_id;
+int txActive=0; //control variable. Should change it!
+//xpto varStruct;
+
+/*VARIABLES - Control Block*/
+volatile controlStruct_t theStruct SPE_ALIGN_FULL;
+//static cachelog *TxLog  SPE_ALIGN_FULL;
+volatile Tx *txStruct SPE_ALIGN_FULL;
+unsigned long long remoteWrSet;
+unsigned long long remoteRdSet;
+
+#ifdef MULTIBUFFER
+volatile Log rdSetBuffer SPE_ALIGN_FULL;
+volatile Log wrSetBuffer SPE_ALIGN_FULL;
+volatile AVPair *wrPuffPut;	// Insert position - cursor
+volatile AVPair *wrBuffList __attribute__((aligned(128)));
+unsigned long long currentRemoteWrSet;
+unsigned long long currentRemoteRdSet;
+
+unsigned long int buffCount; //Isto devia ficar dentro to txStruct Local. Mas alinhamentos?
+#endif
+
+int countRdBufferTransfered =0; //REMEMBER MAX__LIST_SIZE
+int countWrBufferTransfered =0;  //REMEMBER MAX__LIST_SIZE
+
+
+/*Auxiliar Functions*/
+
+static inline AVPair *MakeList(int const sz){
+	int CachePad=64;
+	//ASSERT_DEBUG(sz > 0);
+	// Use CachePad to reduce the odds of false-sharing.
+	AVPair *ap = (AVPair *) malloc((sizeof(*ap) * sz) + CachePad);
+	//ASSERT(ap != NULL);
+	memset(ap, 0, sizeof(*ap) * sz);
+	int i;
+	for (i = 0; i < sz; i++)
+	{
+		(ap + i)->Owner = theStruct.Owner;
+	}
+	return ap;
+}
+
+
+#ifdef MULTIBUFFER
+//Returns 1 if one of the buffer is full
+int WrBufferFull(){
+	
+	//if(txStruct->wrSet.Put == txStruct->wrSet.List) return 1;
+	if(txStruct->wrSet.CurrentList == MAX_LOCAL_LIST_SIZE) return 1;
+	else return 0;
+	
+}
+
+int RdBufferFull() {
+	
+	//if (txStruct->rdSet.Put == txStruct->rdSet.List) return 1;
+	if(txStruct->rdSet.CurrentList == MAX_LOCAL_LIST_SIZE) return 1;
+	else return 0;
+}
+
+int DumpWrSet(){
+//unsigned long long remoteWrSet = theStruct.wrSet;AVPair *tmpList = txStruct->wrSet.List;
+
+	while(txStruct->wrSet.List < txStruct->wrSet.Put){
+		//printf("Transfering AVPair to memory position = %llx and from SPE memory position = %p\n", theStruct.wrSet , txStruct->wrSet.List);
+		//mfc_put(txStruct->wrSet.List, remoteWrSet+(countWrBufferTransfered * 176 * MAX_LOCAL_LIST_SIZE), sizeof(AVPair) , tag_id, 0, 0);
+		mfc_put(txStruct->wrSet.List, currentRemoteWrSet, sizeof(AVPair) , tag_id, 0, 0);
+		//printf("Valor a passar = %d \n", *(txStruct->wrSet.List->ObjValu[0]));
+		txStruct->wrSet.List++;
+		currentRemoteWrSet+=176; //176 = sizeof(AVPAIR) in PPE
+
+	}
+	txStruct->wrSet.List = tmpList;
+	countWrBufferTransfered++;
+	txStruct->wrSet.List = MakeList(MAX_LOCAL_LIST_SIZE);
+	txStruct->wrSet.Put = txStruct->wrSet.List;
+	txStruct->wrSet.CurrentList=0;
+	return 1;
+}
+
+int DumpRdSet() {
+
+	//unsigned long long remoteRdSet = theStruct.rdSet;
+	AVPair *tmpList = txStruct->rdSet.List;
+	while(txStruct->rdSet.List < txStruct->rdSet.Put){
+		//mfc_put(txStruct->rdSet.List, remoteRdSet+(countRdBufferTransfered * 176 * MAX_LOCAL_LIST_SIZE), sizeof(AVPair), tag_id, 0, 0);
+		mfc_put(txStruct->rdSet.List, currentRemoteRdSet, sizeof(AVPair), tag_id, 0, 0);
+		txStruct->rdSet.List++;
+		currentRemoteRdSet+=176; //176 = sizeof(AVPAIR) in PPE
+	}
+	txStruct->rdSet.List = tmpList;
+	txStruct->rdSet.List = MakeList(MAX_LOCAL_LIST_SIZE);
+	txStruct->rdSet.Put = txStruct->rdSet.List;
+	txStruct->rdSet.CurrentList=0;
+	countRdBufferTransfered++;
+	return 1;
+}
+#endif
+
+
+
+void printWrSet(){
+	Log *const wr = &txStruct->wrSet;
+
+	AVPair *p;
+	int i=0;
+					//lets double check since bloomfilter gives false positives.
+
+					for (p = wr->Put - 1; p >= wr->List; p--)
+					{
+						printf("i=%d --- p->Addr= %llx , p->ObjValu[0]=%d  \n", i, p->Addr , p->ObjValu[0]);
+						i++;
+
+					}
+}
+
+void printRdSet(){
+	Log *const wr = &txStruct->rdSet;
+
+	AVPair *p;
+	int i=0;
+					//lets double check since bloomfilter gives false positives.
+
+					for (p = wr->Put - 1; p >= wr->List; p--)
+					{
+						printf("i=%d --- p->Addr= %llx , p->ObjValu[0]=%d  \n", i, p->Addr , p->ObjValu[0]);
+						i++;
+
+					}
+}
+
+
+/*LIBRARY ALLOWED FUNCTIONS
+ * Returns the pointer to User Structure.
+ * Initializes TxStruct.
+ * Must receive argp from main(...,argp,...);
+ * Missing the Global version clock read on transaction start.
+ * */
+unsigned long long TxStart(long long int argp){
+
+	int tag_id;
+/*#ifdef DEBUGON2
+	printf("######ENTERING TxStart(TL_SPU)#############\n");
+	printf("Printinf info on sizes IN SPE\n");
+	printf("Size of intprt_t = %d\n", sizeof(intptr_t));
+	printf("Size of unsigned long long = %d\n", sizeof(unsigned long long));
+	printf("Size of pointer = %d\n", sizeof(void *));
+	printf("Size of AVPAIR is = %d\n", sizeof(AVPair));
+	printf("END OF Printinf info on sizes IN SPE\n");
+#endif*/
+	/* Reserve a tag for application usage */
+	  if ((tag_id = mfc_tag_reserve()) == MFC_TAG_INVALID) {
+	    printf("ERROR: unable to reserve a tag\n");
+	    return 1;
+	  }
+	  int tag = 1, tag_mask = 1<<tag;
+	  mfc_get(&theStruct, argp, sizeof(theStruct), tag, 0, 0);
+	  mfc_write_tag_mask(tag_mask);
+	  mfc_read_tag_status_all();
+	  remoteWrSet = theStruct.wrSet;
+	  remoteRdSet = theStruct.rdSet;
+//#ifdef MULTIBUFFER
+	  currentRemoteWrSet=remoteWrSet;
+	  currentRemoteRdSet=remoteRdSet;
+//#endif
+/*#ifdef DEBUGON2
+	  printf("Done transfering. Current userStruct pointer= 0x%llx\n", theStruct.userStruct);
+	  printf("Done transfering. Current TxStruct pointer= 0x%llx\n", theStruct.txStruct);
+	  printf("Done transfering. Current RVCLOCK read is = 0x%llx\n", theStruct.rv);
+	  printf("Done transfering. Current LockTab pointer is= 0x%llx\n", theStruct.lockTab);
+#endif*/
+	  //printf("Done transfering. Current Global Version value= %llx\n", theStruct.rv);
+
+	 //theStruct = (controlStruct_t *) malloc(sizeof(controlStruct_t));
+	 //theStruct.txStruct=((controlStruct_t *) argp)->txStruct;
+	 //theStruct.userStruct=((controlStruct_t *) argp)->userStruct;
+
+	 // printf("Starting mallocing....\n");
+	 //TxLog = (cachelog *) malloc(sizeof(cachelog)); //inicializa��o do log.
+	 txActive=1;
+	 txStruct = (Tx *) malloc(sizeof(Tx));
+	 txStruct->wrSet.List = MakeList(MAX_LOCAL_LIST_SIZE);
+	 txStruct->wrSet.Put = txStruct->wrSet.List;
+	 txStruct->rdSet.List = MakeList(MAX_LOCAL_LIST_SIZE);
+	 txStruct->rdSet.Put = txStruct->rdSet.List;
+	 txStruct->rdSet.CurrentList=0;
+	 txStruct->wrSet.CurrentList=0;
+	 txStruct->lowerTx = NULL;
+	 txStruct->upperTx = NULL;
+	 txStruct->Mode = TIDLE;
+	 //printf("Done mallocing....\n");
+/*#ifdef MULTIBUFFER
+	 wrSetBuffer.List = MakeList(MAX_LOCAL_LIST_SIZE);
+	 wrSetBuffer.Put = txStruct->wrSet.List;
+	 rdSetBuffer.List = MakeList(MAX_LOCAL_LIST_SIZE);
+	 rdSetBuffer.Put = txStruct->rdSet.List;
+#endif*/
+	 //varStruct = malloc(sizeof(int)*2);
+
+
+	 //mfc_get(&theStruct.TxStruct, argp, sizeof(theStruct), tag, 0, 0);
+	 //identificar o SPE_ID. vou precisar para os mailboxes.
+
+
+	 //printf("tag ID = %d \n UserStruct=%d\n" , tag_id, &theStruct.userStruct);
+/*#ifdef DEBUGON
+	printf("Status of the writeSet in SPE: \n");
+	printf("Pointer to beggining of List = %d\n", (txStruct->wrSet.List));
+	printf("Pointer to current position in List = %d\n", (txStruct->wrSet.Put));
+	//printf("Size of List = %d\n", txStruct.wrSet.CurrentList);
+	printf("Value of first position of WriteSet = %d \n", (txStruct->wrSet.List)->ObjValu[0]);
+	printf("Value of second position of WriteSet = %d \n", (txStruct->wrSet.List)->ObjValu[1]);
+
+
+	printf("Status of the readSet in SPE: \n");
+	printf("Pointer to beggining of List = %d\n", (txStruct->rdSet.List));
+	printf("Pointer to current position in List = %d\n", (txStruct->rdSet.Put));
+	//printf("Size of List = %d\n", txStruct.wrSet.CurrentList);
+	printf("Value of first position of WriteSet = %d \n", (txStruct->rdSet.List)->ObjValu[0]);
+	printf("######LEAVING TxStart (TL_SPU)#############\n");
+#endif*/
+	 return theStruct.userStruct;
+}
+
+/*Loads a value from main memory (address) to a LS destination.
+ * Might be already
+ *
+ * */
+void TxLoad(volatile *destination,  long long int address, int size){ //size?
+/*
+ * Search local cache for the address. If not present in cache, DMA transfer from main memory and update Read-Set
+ * LOAD(ea);
+ * 1)Check write-set for address.
+ * 		1.1)If present -> return value in writeset
+ * 		1.2)If not present -> mfcget
+ * 			1.2.1)Check if mfcget.rv<=txStruct.rv
+ * 				1.2.1.1)if true - add value to readset and return value.
+ * 				1.2.1.2)if false - abort tx? inconsistent state. Other transaction has written in a variable we wish to read.
+ * */
+
+/*#ifdef MULTIBUFFER
+	intptr_t lst;
+	intptr_t put;
+	AVPair auxPair;
+	unsigned int remAddr;
+#endif*/
+
+
+/*#ifdef DEBUGON
+	printf("######ENTERING TxLoad(TL_SPU)#############\n");
+	printf("Arguments are... destination = %p and remote address = %llu \n", destination, address);
+	printf("Size of readSet before EVERYTHING is = %d\n", txStruct->rdSet.CurrentList );
+#endif*/
+
+	if(txActive!=1){
+		printf("No transaction started - Must start a transaction to issue a TxLoad\n");
+		return 0;
+	}
+
+//#ifdef MULTIBUFFER //swap buffers and dump
+	if(RdBufferFull()) {
+
+		printf("Swaping buffers RdSet\n");
+
+		//lst = txStruct->rdSet.List;
+		//put= txStruct->rdSet.Put;
+
+		//txStruct->rdSet.List= rdSetBuffer.List;
+		//txStruct->rdSet.Put = txStruct->rdSet.List; //reset insertion pointer
+		//rdSetBuffer.List=lst;
+		//rdSetBuffer.Put=put;
+		DumpRdSet(); //mfcPut
+
+	}
+
+//#endif
+
+	long long int tmp=address;
+	//check in wrSet for address
+	Log *const wr = &txStruct->wrSet;
+	//vwLock volatile *LockFor = PSLOCK(address); (atencao a linha de baixo, é necessário ser endereco de 64bits)
+	volatile vwLock *LockFor = ((theStruct.lockTab) + (PSLOCKOFFSET(tmp)));
+	intptr_t msk = FILTERBITS(tmp);
+	//bloomfilter finds it?
+	if ((wr->BloomFilter & msk) == msk)
+			{
+				AVPair *p;
+				//lets double check since bloomfilter gives false positives.
+
+				//printf("bloomfilter found (suposselly) -> Double Checking\n");
+
+				for (p = wr->Put - 1; p >= wr->List; p--)
+				{
+					//ASSERT_DEBUG(p->Addr != NULL); //hum.. aqui como vai ser?
+					if(p->Addr == NULL){
+					  printf("ERROR :(TxStore) p->Addr = null\n");	
+					  return NULL ;
+					}
+					//found it?
+
+					if (p->Addr == address)
+					{
+						//ASSERT_DEBUG(LockFor == PSLOCK(p->Addr));
+						/*CBEA version*/
+						//ASSERT_DEBUG(LockFor = (theStruct.lockTab + PSLOCKOFFSET(address));
+						if(LockFor != (theStruct.lockTab + PSLOCKOFFSET(address))) return NULL;
+
+						//TraceEvent(Self->UniqID, 20, _tl_txload, addr, (intptr_t)0,(intptr_t)p->ObjValu[0]);
+				//printf("Found object in bloom filter on TxLoad - Returning current transaction object value = %d\n", p->ObjValu);
+						*destination = p->ObjValu[0];
+						//printf("#Internal Library SPE -> Found in wrSet#\n");
+						return;
+						//return p->ObjValu[0];
+					}
+				}
+
+				//didnt find it locally. Must go search Local Memory.
+				//1)mailbox PPE. 2) mfc controlStruct->PointerToObjValu   3) mfc_get(destination, ControlStruct->PointerToObjValu)
+				// 4)return;
+
+				//SEARCH IT IN MAIN MEMORY
+				if (countWrBufferTransfered > 0) {
+
+					/*printf("#tl_spu - TxLoad#remoteSearchMainMemory\n");
+					printf("Remote Put = %llx\n", remoteWrSet + countWrBufferTransfered * MAX_LOCAL_LIST_SIZE * 176);
+					printf("Remote Put (-176) = %llx\n", remoteWrSet + (countWrBufferTransfered * MAX_LOCAL_LIST_SIZE * 176) -176);
+					printf("currentRemoteWrSet = %llx \n",currentRemoteWrSet );
+					printf("currentRemoteWrSet (-176) = %llx \n",currentRemoteWrSet -176 );*/
+
+					int tag = 1, tag_mask = 1 << tag;
+					//AVPair *tmpList = txStruct->List;
+					unsigned long long tmpList = remoteWrSet;
+					unsigned long long tmpPut = currentRemoteWrSet; //remoteWrSet * countWrBufferTransfered * MAX_LOCAL_LIST_SIZE * 176;
+					tmpPut-=176; // -1 for last entry in WriteSet.
+					//offset of transfered buffer.
+					//AVPair *tmpPut = txStruct->List * countWrBufferTransfered * MAX_LOCAL_LIST_SIZE * 176;
+					AVPair tmp;
+					//while (tmpList < tmpPut) {
+					while(tmpPut>tmpList){
+
+						/*printf("getting remote wrSet entry -> %llx\n", tmpPut);
+						printf("tmpList= -> %llx\n", tmpList);*/
+
+						mfc_get(&tmp, tmpPut, sizeof(AVPair), tag_id, 0, 0);
+						mfc_write_tag_mask(tag_mask);
+						mfc_read_tag_status_all();
+						if (tmp.Addr == address) {
+
+							printf("remoteSearch found the entry.. returning.. value=%d\n", tmp.ObjValu[0]);
+
+							*destination = tmp.ObjValu[0];
+							return;
+						}
+						tmpPut-=176;
+					}
+				}
+
+			}
+
+
+
+
+	//address not found in wrSet. Lets load from main memory.
+	//Is variable Locked?
+	vwLock rdv2 = LDLOCK(LockFor); //isto tem que ser mfc_get. OU NAO! discuss...
+	//#ifdef DEBUGON
+	//printf("IS_VERSION(rdv2) = %d  and rdv2<=theStruct.rv <=> %d <= %d  \n" , IS_VERSION(rdv2) , rdv2 , theStruct.rv );
+	//#endif
+	if ( IS_VERSION(rdv2) /*&& (((int) rdv2) <= ((int)theStruct.rv))*/) {
+		//printf("Received arguments: destination=%p  , source = %llx  , size = %d\n" , destination , address, size);
+		//printf("Passo 1 \n");
+		//int tag = 1;
+		//int tag_mask = 1 << tag_id;
+
+		int tag = 1, tag_mask = 1<<tag;
+		//printf("Passo 1 - address = %llu \n", address);
+		mfc_get(destination, (unsigned long long) address, size, tag_id, 0, 0);
+		//printf("Passo 2 - address = %llu \n", address);
+		//printf("Passo 3 \n");
+		mfc_write_tag_mask(tag_mask);
+		mfc_read_tag_status_all();
+//#ifdef DEBUGON
+		//printf("#Internal Library SPE TxLoad(mfc)#\n");
+//#endif
+		//from TrackLoad - tl.c
+		Log *k = &txStruct->rdSet;
+		//ASSERT_DEBUG(!IS_LOG_FULL(k));
+
+		k->Put->Addr = address;
+//#ifdef DEBUGON
+		//printf("Asserted in rdSet the remote location k->Put->Addr = address <=> %llx = %llx \n" , k->Put->Addr , address);
+//#endif
+		k->Put++;
+		k->CurrentList++;
+
+	}
+	else{//abort situation.
+
+
+		printf("Aborting Transaction.. Inconsistency detected\n");
+		//printf("IS_VERSION(rdv2) = %d  && rdv2 <= theStruct.rv <=> %d <= %d \n", IS_VERSION(rdv2), rdv2, theStruct.rv);
+
+		TxAbort();
+		return;
+
+	}
+//#ifdef DEBUGON
+	//printf("######Leaving TxLoad(TL_SPU)#############\n");
+//#endif
+	return;
+
+}
+
+#define WORD_COPY(d,s) do {\
+	d=s;\
+}while(0)
+
+
+//intptr_t TxStore(intptr_t volatile localAddress, unsigned long long remoteAddress, intptr_t const value)
+/*
+ * This is a need to be discussed. I really dont need the value as an argument, i only need either the pointer to localSotre value or the value. TY!
+ * */
+void TxStore(unsigned long long volatile address, intptr_t value) { //size?
+/*
+ * Do not store in main memory (or yes in case we are working in main memory mode, but to a different copy)
+ * Update Write-Set. (make it dirty on cache)
+ * STORE(ea, &val)
+ * * */
+	//STORE(address, &value);
+
+//#ifdef DEBUGON
+	//printf("######Entering TxStore(TL_SPU)#############\n");
+	//printf("Size of wrSet before EVERYTHING is = %d\n", txStruct->wrSet.CurrentList );
+//#endif
+
+	if (txActive != 1) {
+		printf("No transaction started - Must start a transaction to issue a TxLoad\n");
+		return;
+	}
+
+	if(WrBufferFull()){
+
+
+		printf("Swaping buffers WrSet\n");
+
+		//lst = txStruct->wrSet.List;
+		//put= txStruct->wrSet.Put;
+		
+		//txStruct->wrSet.List= wrSetBuffer.List;
+		//txStruct->wrSet.Put = txStruct->wrSet.List; //Reset insertion pointer.
+		//wrSetBuffer.List=lst;
+		//wrSetBuffer.Put=put;
+		DumpWrSet();
+		
+	}
+
+	Log *wr = &txStruct->wrSet;
+	//MEMBARLDLD(); /We dont need memory barriers
+	wr->BloomFilter |= FILTERBITS(address);
+
+	Log *k = &txStruct->wrSet;
+	//ASSERT(!IS_LOG_FULL(k));
+	//ASSERT_DEBUG(address != NULL);
+	if(address == NULL) return; // return NULL;
+	AVPair *p = k->Put;
+	k->Put++;
+	k->CurrentList++;
+	p->Addr = address;
+	//LINE_COPY(p->ObjValu, &Valu);
+	WORD_COPY(p->ObjValu[0], value); //Esta é a linha original
+	//printf("Asserted ObjValu with value = %ld for remote address = %llx\n", value , p->Addr);
+	//WORD_COPY(p->ObjValu[0], theStruct.pointerToObjValu);
+	p->Held = 0;
+	p->rdv = LOCKBIT; // use either 0 or LOCKBIT
+
+	//TxLog->writeset[sizeof(int)*(TxLog->countw)].address=(int *)address;
+	//TxLog->writeset[sizeof(int)*(TxLog->countw)].value = value;
+	//TxLog->countw++;
+//#ifdef DEBUGON
+	//printf("######Leaving TxStore(TL_SPU)#############\n");
+	printf(" "); //THE MYSTERIOUS PRINTF!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+//#endif
+	return;
+}
+void TxCommit(){
+/*
+ * Flush wrSet and rdSet to main memory.
+ * */
+
+	int totalValue, totalValue1;
+/*#ifdef DEBUGON
+	printf("######Entering TxCommit(TL_SPU)#############\n");
+	printf("Status of the writeSet in SPE: \n");
+	printf("Pointer to beggining of List = %d\n", &(txStruct->wrSet.List));
+	printf("Pointer to current position in List = %d\n", &(txStruct->wrSet.Put));
+	//printf("Size of List = %d\n", txStruct.wrSet.CurrentList);
+	printf("Value of first position of WriteSet = %d \n", (txStruct->wrSet.List)->ObjValu[0]);
+	printf("Buffer counter wrSet = %d , RdSet = %d \n", countWrBufferTransfered, countRdBufferTransfered);
+	printf("####End of Status of the writeSet in SPE ######\n");
+#endif*/
+
+	if ((tag_id = mfc_tag_reserve()) == MFC_TAG_INVALID) {
+		printf("ERROR: unable to reserve a tag\n");
+		return NULL;
+	}
+	int tag_mask = 1 << tag_id;
+
+//#ifdef DEBUGON
+	//printf("Printing information:\n");
+	//printf("temp->wrSet = 0x%llx \n", temp->wrSet.List);
+	//printf("Pointer received of the wrSet 0x%llx \n", txStruct->wrSet.List);
+//#endif
+
+
+	//int i=0;
+	//AVPair *tempPair;
+	
+
+	while(txStruct->wrSet.List < txStruct->wrSet.Put){
+		//printf("Transfering AVPair to memory position = %llx and from SPE memory position = %p\n", theStruct.wrSet , txStruct->wrSet.List);
+#ifdef MULTIBUFFER
+		mfc_put(txStruct->wrSet.List, currentRemoteWrSet, sizeof(AVPair) , tag_id, 0, 0);
+		currentRemoteWrSet+=176;
+#endif
+#ifndef MULTIBUFFER
+		mfc_put(txStruct->wrSet.List, remoteWrSet, sizeof(AVPair) , tag_id, 0, 0);
+		remoteWrSet+=176;
+#endif
+		//printf("Valor a passar = %d \n", *(txStruct->wrSet.List->ObjValu[0]));
+		txStruct->wrSet.List++;
+		 //176 = sizeof(AVPAIR) in PPE
+
+	}
+	//isto é nr de entradas no wrset.
+	//printf("Trying to set size of wrset which is = %d\n", txStruct->wrSet.CurrentList );
+	if(countWrBufferTransfered==0){
+//#ifdef DEBUGON
+		//printf("#TxCommit WrSet# Size of local wrSet is = %d\n", txStruct->wrSet.CurrentList );
+//#endif
+		//printf("#TxCommit WrSet# transfering withouth multibuffer WrSet theStruct.CurrentListrdSet=%d \n", theStruct.CurrentListwrSet);
+		mfc_put(&(txStruct->wrSet.CurrentList), theStruct.CurrentListwrSet, sizeof(int), tag_id, 0, 0);
+
+	}
+	else{
+/*#ifdef DEBUGON
+		printf("#TxCommit WrSet# Size of local wrSet is = %d\n", txStruct->wrSet.CurrentList );
+		//printf("MAX_LOCAL_LIST_SIZE=%d , countWrBufferTransfered=%d , theStruct.CurrentListwrSet=%d \n",MAX_LOCAL_LIST_SIZE, countWrBufferTransfered, theStruct.CurrentListwrSet);
+		printf("#TxCommit# -> transfering size of total (multibuffer) WrSet log = %d \n", theStruct.CurrentListwrSet + (countWrBufferTransfered * MAX_LOCAL_LIST_SIZE));
+#endif*/
+		//mfc_put(&(txStruct->wrSet.CurrentList), theStruct.CurrentListwrSet + (countWrBufferTransfered * MAX_LOCAL_LIST_SIZE) , sizeof(int), tag_id, 0, 0);
+		totalValue1 = txStruct->wrSet.CurrentList + countWrBufferTransfered*MAX_LOCAL_LIST_SIZE;
+/*#ifdef DEBUGON
+		printf("Total value wrSet= %d\n", totalValue);
+#endif*/
+		mfc_put( &totalValue1, theStruct.CurrentListwrSet, sizeof(int), tag_id, 0, 0 );
+	}
+	mfc_write_tag_mask(tag_mask);
+	mfc_read_tag_status_all();
+	/**/
+	//transfer wrSet - Aqui vai passar a estar mfcput address e o ObjValu
+	//printf("Library - tl-spu - Destination of wrSet is = %llx\n", theStruct.wrSet);
+
+	//mfc_put(&txStruct->wrSet, theStruct.wrSet, ((txStruct->wrSet.Put) - (txStruct->wrSet.List)), tag_id, 0, 0);
+
+
+
+	//printf("Library - tl-spu - Destination of rdSet is = %llx\n", theStruct.rdSet);
+	while(txStruct->rdSet.List < txStruct->rdSet.Put){
+		//mfc_put(txStruct->rdSet.List, remoteRdSet+(countRdBufferTransfered * 176 * MAX_LOCAL_LIST_SIZE), sizeof(AVPair), tag_id, 0, 0);
+#ifdef MULTIBUFFER
+		mfc_put(txStruct->rdSet.List, currentRemoteRdSet, sizeof(AVPair) , tag_id, 0, 0);
+		currentRemoteRdSet+=176;
+#endif
+#ifndef MULTIBUFFER
+		mfc_put(txStruct->rdSet.List, remoteRdSet, sizeof(AVPair), tag_id, 0, 0);
+		remoteRdSet+=176; //176 = sizeof(AVPAIR) in PPE
+#endif
+		txStruct->rdSet.List++;
+	}
+	//printf("Trying to set size of rdset which is =%d\n" , txStruct->rdSet.CurrentList );
+	if(countRdBufferTransfered==0){
+/*#ifdef DEBUGON
+		printf("#TxCommit rdSet# Size of local rdSet is  = %d\n", txStruct->rdSet.CurrentList );
+#endif*/
+		//printf("#TxCommit rdSet# transfering withouth multibuffer rdSet theStruct.CurrentListrdSet=%d \n", txStruct->rdSet.CurrentList);
+		mfc_put(&(txStruct->rdSet.CurrentList), theStruct.CurrentListrdSet, sizeof(int), tag_id, 0, 0);
+	}
+	else {
+/*#ifdef DEBUGON
+		printf("#TxCommit rdSet# Size of local rdSet is = %d\n", txStruct->rdSet.CurrentList );
+		printf("MAX_LOCAL_LIST_SIZE=%d , countRdBufferTransfered=%d , theStruct.CurrentList=%d \n",MAX_LOCAL_LIST_SIZE, countRdBufferTransfered, txStruct->rdSet.CurrentList);
+		printf("#TxCommit rdSet# -> transfering size of total rdSet log = %d \n#", txStruct->rdSet.CurrentList + (countRdBufferTransfered * MAX_LOCAL_LIST_SIZE));
+#endif*/
+		//mfc_put(&(txStruct->rdSet.CurrentList), theStruct.CurrentListrdSet + (countRdBufferTransfered * MAX_LOCAL_LIST_SIZE) , sizeof(int), tag_id, 0, 0);
+		totalValue = txStruct->rdSet.CurrentList + countRdBufferTransfered*MAX_LOCAL_LIST_SIZE;
+/*#ifdef DEBUGON
+		printf("Total value rdSet= %d", totalValue);
+#endif*/
+		mfc_put( &totalValue, theStruct.CurrentListrdSet, sizeof(int), tag_id, 0, 0 );
+	}
+	mfc_write_tag_mask(tag_mask);
+	mfc_read_tag_status_all();
+
+	//spu_write_out_mbox(MFC_TAG_SENT); //SEND TAG=DMA TRANSFERED. (remember, a hazard may happen, since PPE can read mailbox before DMA completion.
+	//send RS and WS.
+	//mailbox PPE with ADD, and send DMA to main memory with RS WS and whole structure.
+	//listen on mailbox
+	//int tag = spu_read_in_mbox(); //Can i commit and clean data? Does the PPE do that?
+/*#ifdef DEBUGON
+	printf("######Leaving TxCommit(TL_SPU)#############\n");
+	printf("Printinf info on sizes IN SPE\n");
+	printf("Size of intprt_t = %d\n", sizeof(intptr_t));
+	printf("Size of unsigned long long = %d\n", sizeof(unsigned long long));
+	printf("Size of Long int = %d\n", sizeof(long int));
+	printf("Size of int = %d\n", sizeof(int));
+	printf("Size of pointer = %d\n", sizeof(sizeof(void *)));
+	printf("END OF Printinf info on sizes IN SPE\n");
+	printf("Size of AVPAIR is %d\n", sizeof(AVPair));
+#endif*/
+
+	txActive=0;
+	//if(tag==0){ TxAbort();} //or retry
+	//else{
+
+		//CACHE_FLUSH(); //OR (most likely) mfc_put(src,dest,num_bytes,tag,0,0); (when i have my own cache system)
+					//do the GClock update? unf... this must be atomic. the best is the be the PPE to commit last changes. this and lastline.
+
+		//return;
+	//}
+
+}
+
+void TxAbort(){
+/*
+ * Clear cache.
+ * free() the struct
+ * */
+
+	free(txStruct);
+	txActive=0;
+	return;
+
+}
+
+

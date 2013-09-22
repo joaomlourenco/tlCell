@@ -1,0 +1,145 @@
+#!/bin/sh
+# --------------------------------------------------------------
+# (C) Copyright 2001,2007,
+# International Business Machines Corporation,
+#
+# All Rights Reserved.
+# --------------------------------------------------------------
+
+#------------------------------------------------------------------------
+#  cellsdk_select_compiler
+#
+#  This script selects the compiler in make.env
+#
+#------------------------------------------------------------------------
+
+#
+# Miscellaneous variables
+#
+if [ -f ${CELL_TOP}/buildutils/make.env ] ; then
+	CELL_BUILD_DIR=$CELL_TOP
+else
+	CELL_BUILD_DIR=/opt/cell/sdk
+fi
+
+#--------------------------------------------------------------------------
+# Switches to the GCC compiler
+#
+# args:
+#			none
+#
+# return
+#			0 =
+function switch_to_gcc()
+{
+  if [ "`grep "^ .*_COMPILER.*:= gcc" ${CELL_BUILD_DIR}/buildutils/make.env`" == "" ] ; then
+	sed -i -e 's/^    PPU32_COMPILER	:= xlc/#   PPU32_COMPILER	:= xlc/' \
+	       -e 's/^#   PPU32_COMPILER	:= gcc/    PPU32_COMPILER	:= gcc/' \
+	       -e 's/^    PPU64_COMPILER	:= xlc/#   PPU64_COMPILER	:= xlc/' \
+	       -e 's/^#   PPU64_COMPILER	:= gcc/    PPU64_COMPILER	:= gcc/' \
+	       -e 's/^    SPU_COMPILER	:= xlc/#   SPU_COMPILER	:= xlc/' \
+	       -e 's/^#   SPU_COMPILER	:= gcc/    SPU_COMPILER	:= gcc/' \
+	    ${CELL_BUILD_DIR}/buildutils/make.env && echo "Default compiler changed to GCC."
+  else
+      echo "Default compiler is already set to GCC."
+  fi
+}
+
+
+#--------------------------------------------------------------------------
+# Switches to the XLC compiler
+#
+# args:
+#			none
+#
+# return
+#			0 =
+function switch_to_xlc()
+{
+  if [ "`grep "^ .*_COMPILER.*:= xlc" ${CELL_BUILD_DIR}/buildutils/make.env`" == "" ] ; then
+	sed -i -e 's/^#   PPU32_COMPILER	:= xlc/    PPU32_COMPILER	:= xlc/' \
+	       -e 's/^    PPU32_COMPILER	:= gcc/#   PPU32_COMPILER	:= gcc/' \
+	       -e 's/^#   PPU64_COMPILER	:= xlc/    PPU64_COMPILER	:= xlc/' \
+	       -e 's/^    PPU64_COMPILER	:= gcc/#   PPU64_COMPILER	:= gcc/' \
+	       -e 's/^#   SPU_COMPILER	:= xlc/    SPU_COMPILER	:= xlc/' \
+	       -e 's/^    SPU_COMPILER	:= gcc/#   SPU_COMPILER	:= gcc/' \
+	    ${CELL_BUILD_DIR}/buildutils/make.env && echo "Default compiler changed to XLC."
+  else
+      echo "Default compiler is already set to XLC."
+  fi
+}
+
+
+#--------------------------------------------------------------------------
+# Displays the usage statement
+#
+# args:
+#			none
+#
+# return
+#			0 =
+function usage()
+{
+  echo "Usage: $SELF <gcc|xlc> "
+  echo ""
+  echo "  gcc use GCC to compile the libraries and samples (default)"
+  echo "  xlc use XLC to compile the libraries and samples "
+  echo ""
+}
+
+
+#--------------------------------------------------------------------------
+# Continue with main line execution of script
+
+
+#  Set our name
+SELF=`basename $0`
+FULL_SELF=$0
+
+
+#  Ensure we have at least one argument
+if [ $# -lt 1 ] ; then
+  usage
+  exit 1
+fi
+
+#  Pop the first argument as the task
+TASK=$1
+shift
+
+case $TASK in
+  gcc|xlc)
+    if [ ! -w ${CELL_BUILD_DIR}/buildutils/make.env ] ; then
+	echo ${CELL_BUILD_DIR}/buildutils/make.env "not writable"
+	exit 1
+    fi
+    ;;
+
+  -?|-h|--help|--usage)
+    usage
+    exit 0
+    ;;
+
+  *)
+    echo "$SELF:  unknown option '$TASK'"
+    usage
+    exit 1
+    ;;
+
+esac
+
+case $TASK in
+ 	gcc)
+		switch_to_gcc
+		;;
+
+ 	xlc)
+		switch_to_xlc
+		;;
+	*)
+		usage
+		exit 1
+		;;
+esac
+
+# end of script

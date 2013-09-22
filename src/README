@@ -1,0 +1,47 @@
+--------------------------
+--- Flags in configure ---
+--------------------------
+
+You can tune the debug level with --enable-debug-level.
+Please see ./configure --help for all the options you can use. 
+
+Build commit mode/word based
+./configure --enable-mode=cmt
+
+Build encounter mode/word based
+./configure --enable-mode=enc
+
+Build encounter mode/object based
+./configure --enable-mode=enc --enable-granularity=obj
+
+Build of encounter mode/object based/with lock adjacent to data.
+./configure --enable-mode=enc --enable-granularity=objpo
+Place locks next to the object instead of on the lock table.
+Only works with encounter *and* object mode.
+
+Build for PPC CMT mode(default)
+ ./configure --build=powerpc64 --prefix=/home/lopeici/CTL/CTLlib/ CC=ppu-gcc AR=ppu-ar RANLIB=ppu-ranlib STRIP=ppu-strip
+
+---------------------
+--- Flags in tl.h ---
+---------------------
+
+#define ENABLE_NESTING
+Disables transaction nesting. Default IS DISABLED.
+
+#define DISABLE_TXSTERILIZE_EXT
+Disables modification to TXSterilize that increments the lock of the sterilized variable. 
+When disabled, the transactions may run in inconsistent state.
+
+#define DISABLE_STATS_COUNT
+Disables gathering of statistics.
+
+#define DISABLE_LOCAL_VARS
+Disables the usage of transaction local variables.
+
+----------------------------
+--- Flags in trace_log.h ---
+----------------------------
+
+#define ENABLE_TRACE
+enable tracing to the file global_trace.log

@@ -1,0 +1,511 @@
+#include <stdio.h>
+#include <spu_intrinsics.h>
+#include <spu_mfcio.h>
+#include <stdint.h>
+
+//#include "../common.h"
+#include "tl_spu.h"
+
+//#define DEBUGON
+#define testVector
+//#define testInt
+
+#define MYALIGN(vardecl, n) vardecl\
+	__attribute__ ((__aligned__ (n)))
+
+typedef struct _controlStruct {
+	unsigned long long nodePointer;
+	unsigned long long infoPointer;
+	int typeOperation; //(1->put , 2->delete, 3->Get
+	int key;
+	int value;
+//in case its a put
+} controlStruct __attribute__((aligned(128)));
+
+typedef struct _info {
+	unsigned long long pointerToList;
+	int time;
+	int keyRange;
+	int pctPut;
+	int pctGet;
+	int pctRemove;
+}info __attribute__((aligned(128)));
+
+MYALIGN(volatile unsigned int cane, 128);
+
+#ifdef testInt
+int data __attribute__((aligned(128)));
+#endif
+
+#ifdef testDouble
+int dataDouble __attribute__((aligned(128)));
+#endif
+
+
+int boardSize=2000;
+int dboard[2000] __attribute__((aligned(16)));
+
+unsigned long long remoteValueAddress;
+//intptr_t *dboard;
+//volatile int data __attribute__((aligned(128)));
+int i=0;
+unsigned long long pointerToData __attribute__((aligned(128)));
+unsigned long long VectorPointer __attribute__((aligned(128)));
+info infoStruct __attribute__((aligned(128)));
+controlStruct ctrStruct __attribute__((aligned(128)));
+
+
+
+
+
+
+
+
+//int *dboardp __attribute__((aligned(128)));
+//unsigned long long *dboardp2 __attribute__ ((aligned(128)));
+
+
+
+/*void startBoard(int size){
+	unsigned long long *dboardp2 = (unsigned long long *) malloc(sizeof(unsigned long long) * size);
+	boardSize=size;
+}*/
+
+/*Prints dBoard*/
+/*void printInfo() {
+	printf("[");
+	int value;
+	unsigned long long *temp= dboardp2;
+	for (i = 0; i < boardSize; i++) {
+		value = *dboardp2;
+		printf("%d,", value);
+		dboardp2++;
+	}
+	printf("]\n");
+	dboardp2=temp;
+}*/
+
+/*Sets value to every position of dboard*/
+void setValue(int value) {
+	unsigned long long temp = pointerToData;
+	for (i = 0; i < boardSize; i++) {
+		dboard[i]++;
+		TxStore(temp,dboard[i]);
+		temp+=sizeof(int);
+	}
+	//TxStore(pointerToData, data);
+}
+
+/*Return 1 if every value on dboard == value
+ *Should  be checkValue(int value, pointerToData, sizeof(data))
+ * */
+/*int checkValue(int value){
+	unsigned long long temp = pointerToData;
+	for (i = 0; i < 128; i++) {
+		//TxLoad(&dboard, pointerToData, sizeof(dboard));
+			if (TxLoad(&dboard[i], temp, sizeof(int)) != value) return 0;
+			temp+=sizeof(unsigned long long);
+			//if(dboard[i] != value) return 0;
+			//TxLoad();
+		}
+	return 1;
+}*/
+
+/*Checks if values previously written whitin same transactions persist through transaction (RAW)*/
+int persistValuesCheck(int value){
+	//setValue(value);
+	//if(checkValue)
+}
+
+int testRAW(){
+	unsigned long long temp = pointerToData;
+	int valueToCheck,aux;
+	//printf("Commiting RAW test: Load(A)-Write(A)-Load(A)... ");
+	for (i = 0; i < boardSize; i++) {
+		//printf("Transfering... Pointer is %llx \n", temp);
+		TxLoad(&dboard[i], temp, sizeof(int));
+		//printf("Done :dboard[%d] = %d\n", i, dboard[i] );
+		//printf("Done\n");
+		temp += sizeof(int);
+	}
+	temp = pointerToData;
+	valueToCheck = dboard[0]+1;
+	//printf("Increasing by 1, current dboard[%d]= %d\n", i, dboard[i]);
+	for (i = 0; i < boardSize; i++) {
+		
+		TxStore(temp, dboard[i]+1);
+		temp += sizeof(int);
+	}
+	//printWrSet();
+	temp = pointerToData;
+	for (i = 0; i < boardSize; i++) {
+		//printf("Transfering... Pointer is %llx \n", temp);
+		TxLoad(&dboard[i], temp, sizeof(int));
+		if (dboard[i] != valueToCheck) {
+			printf("ERROR : Values do not match. RAW error. dboard[%d] = %d -> Supposed correct Value = %d\n", i, dboard[i] , valueToCheck);
+			//printWrSet();
+			return 0;
+		}
+		//printf("Done :dboard[%d] = %d\n", i, dboard[i] );
+		//printf("Done\n");
+		temp += sizeof(int);
+	}
+	//printf("Success!! =)  Local Reading of previous written variable.\n");
+}
+
+/*int testRAW(){
+	unsigned long long temp = pointerToData;
+	int valueToCheck;
+	printf("Commiting RAW test: Load(A)-Write(A)-Load(A)... \n");
+	for (i = 0; i < boardSize; i++) {
+		//printf("Transfering... Pointer is %llx \n", temp);
+		TxLoad(&dboard[i], temp, sizeof(int));
+		//printf("Done :dboard[%d] = %d\n", i, dboard[i] );
+		//printf("Done\n");
+		temp += sizeof(int);
+	}
+	temp = pointerToData;
+	valueToCheck = dboard[0]+1;
+	int aux;
+	//printf("Increasing by 1, current dboard[%d]= %d\n", i, dboard[i]);
+	for (i = 0; i < boardSize; i++) {
+		aux = dboard[i]+1; //ISTO NAO DEVIA ESTAR AQWUI!
+		//printf("aux=%d \n", aux);
+		TxStore(temp, aux);
+		temp += sizeof(int);
+	}
+	temp = pointerToData;
+	for (i = 0; i < boardSize; i++) {
+		//printf("Transfering... Pointer is %llx \n", temp);
+		TxLoad(&dboard[i], temp, sizeof(int));
+		if (dboard[i] != valueToCheck) {
+			printf("ERROR : Values do not match. RAW error. dboard[%d] = %d -> Supposed correct Value = %d\n", i, dboard[i] , valueToCheck);
+			return 0;
+		}
+		//printf("Done :dboard[%d] = %d\n", i, dboard[i] );
+		//printf("Done\n");
+		temp += sizeof(int);
+	}
+	printf("Success!! =)  Local Reading of previous written variable.\n");
+}*/
+
+int testDoubleStore(){
+	unsigned long long temp = pointerToData;
+	//printf("Testing DoubleStore-Load(a)-Write(A)-Write(A)-Load(A)--");
+	for (i = 0; i < boardSize; i++) {
+		//printf("Transfering... Pointer is %llx \n", temp);
+		TxLoad(&dboard[i], temp, sizeof(int));
+		//printf("Done :dboard[%d] = %d\n", i, dboard[i] );
+		//printf("Done\n");
+		temp += sizeof(int);
+	}
+	temp = pointerToData;
+	int valueToCheck = dboard[0] + 2;
+	int aux;
+	for (i = 0; i < boardSize; i++) {
+		aux = dboard[i]+1;
+		TxStore(temp, aux);
+		//TxStore(temp, dboard[i]);
+		temp += sizeof(int);
+	}
+	temp = pointerToData;
+	//valueToCheck = dboard[0] + 1;
+	aux++;
+	for (i = 0; i < boardSize; i++) {
+		//aux = dboard[i]+1;
+		TxStore(temp, aux);
+		temp += sizeof(int);
+	}
+	temp = pointerToData;
+	for (i = 0; i < boardSize; i++) {
+		//printf("Transfering... Pointer is %llx \n", temp);
+		TxLoad(&dboard[i], temp, sizeof(int));
+		if (dboard[i] != valueToCheck) {
+			printf("ERROR : Values do not match. Double Store failure, unable to read latest entry of WS. error.\n");
+			printf("Should be value = %d and was found dboard[%d]=%d\n", valueToCheck,i, dboard[i]);
+			//printWrSet();
+			return 0;
+		}
+		//printf("Done :dboard[%d] = %d\n", i, dboard[i] );
+		//printf("Done\n");
+		temp += sizeof(int);
+	}
+	//printf("Success - Double entry on wrSet and read the last =) \n");
+
+}
+
+int testRO(){
+	unsigned long long temp = pointerToData;
+	printf("Read only Transaction- duh\n");
+		for (i = 0; i < boardSize; i++) {
+			//printf("Transfering... Pointer is %llx \n", temp);
+			TxLoad(&dboard[i], temp, sizeof(int));
+			//printf("Done :dboard[%d] = %d\n", i, dboard[i] );
+			//printf("Done\n");
+			temp += sizeof(int);
+	}
+
+}
+
+/*Objective: PPE thread has read all position of board in remote set. We will provoke a collision by writing into the set of data,
+ * introducing entrophy on both sides so so assure the PPE thread will write on same set and commit.
+ * After, this SPE transaction will commit the transaction, that will have to abort and retry.
+ *  */
+int testMixTxCollision(){
+
+	return 1;
+}
+
+/*test WS overflow
+ * #define MAX_LIST_SIZE 512
+ * */
+int testWsOverflow(){
+	int q;
+	unsigned long long temp = pointerToData;
+	printf("Testing Write-Set Overflow\n");
+	int listSize=512;
+	for(q=0;q < listSize;q++){
+		TxStore(temp, dboard[0]);
+	}
+	//Aqui vamos fazer + 1 Store.
+}
+/*test WS overflow
+ * #define MAX_LIST_SIZE 512
+ * */
+int testRsOverflow() {
+	int q;
+	unsigned long long temp = pointerToData;
+	printf("Testing Read-Set Overflow\n");
+	int listSize = 512;
+	for (q = 0; q < listSize; q++) {
+		TxLoad(&dboard[0], pointerToData, sizeof(int));
+	}
+	//Aqui vamos fazer + 1 Load. Não deverá arrebentar.
+}
+
+/*A call to this will terminate execution of Transaction. Wont be able to issue another TxStart()*/
+int testAbort() {
+	int q;
+	printf("Test abort-Load(A)-Write(A)-Abort(Tx)");
+	unsigned long long temp = pointerToData;
+	for (q = 0; q < boardSize; q++) {
+		TxLoad(&dboard[q], temp, sizeof(int));
+		temp += (sizeof(int));
+	}
+	temp = pointerToData;
+	for (q = 0; q < boardSize; q++) {
+		TxLoad(&dboard[q], temp, sizeof(int));
+		temp += (sizeof(int));
+	}
+	TxAbort();
+	printf("--Success!!\n");
+
+}
+
+/*ISOLATION LEVELS TESTING -
+ * Mixs PPE transactions and SPE transactions in order to assure that the varibles are locked.
+ * */
+int testDirtyRead(){
+	return 1;
+}
+
+int testNonRepeatableRead(){}
+
+int testPhantomReads(){}
+
+int kv_get(int k){
+
+	int i=0;
+	unsigned long long temp;// __attribute__((aligned(16)));
+	unsigned long long remoteAddr;
+	temp=infoStruct.pointerToList;
+
+	remoteAddr = temp + k*(sizeof(int));
+	TxLoad(&dboard[i], remoteAddr, sizeof(int));
+	//int nodeValue __attribute__((aligned(16)));
+	/*while(i<k){
+		//printf("Txloading from remAddr=%llx to &dboard=%p\n", temp, &dboard[i]);
+		TxLoad(&dboard[i], temp, sizeof(int));
+		temp += (sizeof(int));
+		i++;
+	}*/
+	//TxStore(remoteValueAddress, &dboard[i]);
+	return;
+}
+
+
+int kv_put(int k, int v) {
+	int i = 0;
+	//unsigned long long temp __attribute__((aligned(16)));
+	unsigned long long temp = infoStruct.pointerToList;
+	unsigned long long remoteAddr;
+	//int nodeValue __attribute__((aligned(16)));
+
+	remoteAddr = temp + k*(sizeof(int));
+	TxStore(temp, v);
+
+	/*while (i < k) {
+		//printf("Txloading from remAddr=%llx to &dboard=%p\n", temp, &dboard[i]);
+		TxLoad(&dboard[i], temp, sizeof(int));
+		temp += (sizeof(int));
+		i++;
+		//if(i==boardSize) i=0;
+	}*/
+
+	return 1;
+}
+
+int kv_delete(int k) {
+
+	int i = 0;
+	//unsigned long long temp __attribute__((aligned(16)));
+	unsigned long long temp = infoStruct.pointerToList;
+	unsigned long long remoteAddr;
+	//int nodeValue __attribute__((aligned(16)));
+
+	remoteAddr = temp + k*(sizeof(int));
+	TxLoad(&dboard[i], remoteAddr, sizeof(int));
+
+	/*while (i < k) {
+		//printf("Txloading from remAddr=%llx to &dboard=%p\n", temp, &dboard[i]);
+		TxLoad(&dboard[i], temp, sizeof(int));
+		temp += (sizeof(int));
+		i++;
+	}*/
+	TxStore(temp, 0);
+	return 1;
+
+}
+
+
+
+
+
+int main(unsigned long long spe_id, unsigned long long argp, unsigned long long envp)
+{
+#ifdef DEBUGON
+	printf("######ENTERING main(spuCode)#############\n");
+#endif
+	//unsigned int tag_id;
+	//pointerToData = (unsigned long long) TxStart(argp);
+	//printf("Cheguei:spuCode- after TxStart- Received Pointer to UserStruct=%llu\n", pointerToData);
+	//TxLoad(&dboard, pointerToData, sizeof(dboard));
+	//startBoard(128);
+	//unsigned long long temp = pointerToData;
+
+
+
+
+#ifdef testInt
+	TxLoad(&data,pointerToData,sizeof(data));
+	//printf("Received data with value =  %d , Increasing Data by 1\n", data);
+	data++;
+	TxStore(pointerToData, data);
+	TxCommit();
+#endif
+
+#ifdef testDouble
+	TxLoad(&dataDouble,pointerToData,sizeof(dataDouble));
+	//printf("Received data with value =  %f , Increasing Data by 1\n", dataDouble);
+	dataDouble = dataDouble + 1.0;
+	TxStore(pointerToData, dataDouble);
+	TxCommit();
+#endif
+
+#ifdef testVector
+	/*for(i=0;i<boardSize;i++) {
+		//printf("Transfering... Pointer is %llx \n", temp);
+		TxLoad(&dboard[i],temp,sizeof(int));
+		//printf("Done :dboard[%d] = %d\n", i, dboard[i] );
+		//printf("Done\n");
+		temp+=sizeof(int);
+	}
+	//setValue(20);
+	temp=pointerToData;
+	for(i=0;i<boardSize;i++){
+		dboard[i]= dboard[i] + 1;
+		TxStore(temp, dboard[i]);
+		temp+=sizeof(int);
+	}*/
+	//testRAW();
+	//testDoubleStore();
+	//TxCommit();
+#endif
+
+	unsigned long long pointerToData = (unsigned long long) TxStart(argp);
+
+
+		//printf("Received arguments PointerToData  -> %llx\n", pointerToData);
+		int tag = 1, tag_mask = 1<<tag;
+		mfc_get(&ctrStruct,pointerToData,sizeof(ctrStruct),tag,0,0);
+		mfc_write_tag_mask(tag_mask);
+		mfc_read_tag_status_all();
+
+		remoteValueAddress = pointerToData+ (2*sizeof(unsigned long long)) + (3*sizeof(int));
+		//printf("###CellHarnessSPE###Received arguments remoteThreadStats  -> %llx\n", ctrStruct.remoteThreadStats);
+		//printf("###CellHarnessSPE###Received arguments infoPointer  ->  %llx\n", ctrStruct.infoPointer);
+
+
+		//printf("#Testin remote malloc _ea#");
+		 //__ea eaAddress = __malloc_ea64(sizeof(ctrStruct));
+		 //printf("__ea = % llx\n", __ea);
+		 //printf("#END OF Testin remote malloc _ea#");
+
+		mfc_get(&infoStruct,ctrStruct.infoPointer,sizeof(infoStruct),tag,0,0);
+		mfc_write_tag_mask(tag_mask);
+		mfc_read_tag_status_all();
+		//printf("###CellHarnessSPE###Received arguments pointerToList  ->  %llx\n", infoStruct.pointerToList);
+		//printf("##CellHarnessSPE## Size of mySet -> %d  \n", sizeof(mySet));
+		//printf("##CellHarnessSPE## Size of node_t -> %d  \n", sizeof(node_t));
+		//printf("##CellHarnessSPE## Size of info -> %d  \n", sizeof(info));
+
+		VectorPointer=infoStruct.pointerToList;
+		//mfc_get(&mySet,infoStruct.pointerToList,sizeof(mySet),tag,0,0);
+		//mfc_write_tag_mask(tag_mask);
+		//mfc_read_tag_status_all();
+		//printf("###CellHarnessSPE###Received arguments myset.root  ->  %llx\n", mySet.root);
+
+		if(ctrStruct.typeOperation==1){
+			//printf("Issuing kv_put\n");
+			kv_put(ctrStruct.key, ctrStruct.value);
+
+		}
+		if(ctrStruct.typeOperation==2){
+			//printf("Issuing kv_get, key=%d\n", ctrStruct.key);
+			kv_get(ctrStruct.key);
+
+		}
+		if(ctrStruct.typeOperation==3){
+			//printf("Issuing kv_delete, key=%d\n", ctrStruct.key);
+			kv_delete(ctrStruct.key);
+		}
+
+		TxCommit();
+		return 0;
+
+
+	//TxLoad(&dataDouble,pointerToData,sizeof(dataDouble));
+	//TxLoad(&data, pointerToData, sizeof(data));
+	//printf("Received data with value =  %d , Increasing Data by 1\n", data);
+	//printf("Received data with value =  %f , Increasing Data by 1\n", dataDouble);
+	//dataDouble = dataDouble + 1.0;
+	//TxStore(pointerToData, dataDouble);
+	//TxLoad(&data, pointerToData, sizeof(data));
+	//TxCommit();
+
+
+
+	//TxAbort();
+	/* Sending the address of the memory area where the other spe     */
+	/* process will transfer its data                                 */
+	//spu_write_out_mbox(cane_addr.h);
+	//spu_write_out_mbox(cane_addr.l);
+	/* Synchronizing with the ppe                                     */
+	//spu_read_in_mbox();
+	//printf("(spu1) value: %u\n", cane);
+#ifdef DEBUGON
+	printf("######LEAVING main(spuCode)#############\n");
+#endif
+	return 0;
+}
+

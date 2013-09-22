@@ -1,0 +1,266 @@
+# If you change this don't forget to call autoreconf
+# A good reference: http://www.ensta.fr/~diam/dev/online/autoconf/autobook
+
+AC_INIT([ctl], [1.0], [email@domain.org])
+AC_CONFIG_AUX_DIR(config)
+
+dnl Check host/target/build system
+# See http://www.ensta.fr/~diam/dev/online/autoconf/autobook/autobook_261.html
+AC_CANONICAL_SYSTEM 
+
+AM_CONFIG_HEADER(config.h)
+AM_INIT_AUTOMAKE([1.9 foreign])
+
+AC_PROG_CC
+AC_PROG_MAKE_SET
+AC_PROG_LIBTOOL
+
+AC_LANG_C
+
+AC_HEADER_STDC
+
+AC_CHECK_LIB([pthread], [pthread_create])
+AC_CHECK_HEADERS([fcntl.h inttypes.h limits.h malloc.h stdlib.h string.h \
+    sys/time.h unistd.h pthread.h stdint.h libgen.h])
+
+AC_HEADER_STDBOOL
+AC_C_INLINE
+AC_TYPE_SIZE_T
+
+AC_FUNC_MALLOC
+AC_FUNC_MMAP
+AC_CHECK_FUNCS([memset uname])
+
+dnl Get the prefix
+if test "x${prefix}" = "xNONE"; then
+    PREFIX="${ac_default_prefix}"
+    AC_DEFINE_UNQUOTED(PREFIX, "${ac_default_prefix}", [definition of PREFIX])
+else
+    PREFIX="${prefix}"
+    AC_DEFINE_UNQUOTED(PREFIX, "${prefix}", [definition of PREFIX])
+fi
+AC_SUBST(PREFIX)
+
+# Default flags
+DEBUG_FLAGS=""
+PERF_FLAGS="-O2 -fno-strict-aliasing"
+ARCH_FLAGS=""
+CFLAGS="-Wall -Wshadow -Wwrite-strings -Winline -funit-at-a-time"
+CFLAGS="$CFLAGS --param inline-unit-growth=155 -DLIB_COMPILATION"
+LDFLAGS="$DEBUG_FLAGS $PERF_FLAGS"
+
+# See http://www.ensta.fr/~diam/dev/online/autoconf/autobook/autobook_283.html#SEC283
+AC_ARG_ENABLE(debug-level,
+    AS_HELP_STRING([--enable-debug-level],
+	[set the debug level (0, 1 or 2, default=0)]),
+    [debug_level=$enableval], 
+    [debug_level=0])
+
+AC_ARG_ENABLE(debug,
+    AS_HELP_STRING([--enable-debug],
+	[generate extra debug data (-ggdb)]),
+    [debug=$enableval], 
+    [debug=no])
+
+AC_ARG_ENABLE(tracing,
+    AS_HELP_STRING([--enable-tracing],
+	[enable tracing (default=no)]),
+    [tracing=$enableval], 
+    [tracing=no])
+
+AC_ARG_ENABLE(profiling,
+    AS_HELP_STRING([--enable-profiling],
+	[create extra data for profiling (default=no)]),
+    [profiling=$enableval], 
+    [profiling=no])
+
+AC_ARG_ENABLE(sse,
+    AS_HELP_STRING([--enable-sse],
+	[enable sse (yes, no or auto, default=no)]),
+    [sse=$enableval], 
+    [sse=no])
+
+AC_ARG_ENABLE(mode,
+    AS_HELP_STRING([--enable-mode],
+	[define mode (cmt, enc, default=cmt)]),
+    [mode=$enableval], 
+    [mode=cmt])
+
+AC_ARG_ENABLE(handler,
+    AS_HELP_STRING([--enable-handler],
+	[enable handler (default=yes)]),
+    [handler=$enableval], 
+    [handler=yes])
+
+AC_ARG_ENABLE(pre-alloc-handlers,
+    AS_HELP_STRING([--enable-pre-alloc-handlers],
+	[enable pre allocated handlers (default=no)]),
+    [pre_alloc_handlers=$enableval], 
+    [pre_alloc_handlers=no])
+
+AC_ARG_ENABLE(granularity,
+    AS_HELP_STRING([--enable-granularity],
+	[enable pre allocated handlers (word, obj, objpo, default=word)]),
+    [granularity=$enableval], 
+    [granularity=word])
+
+case "$mode" in
+    'enc')
+	AC_DEFINE(MODE_ENC, 1, mode enc)
+	;;
+    'cmt')
+	AC_DEFINE(MODE_CMT, 1, mode cmt)	
+	;;
+    *)
+	AC_MSG_ERROR(Mode must be enc or cmt) 
+	;;
+esac
+
+if `perl -e "exit (\"$target_cpu\" =~ m/86_64$/i ? 0 : -1)"`; then
+    AC_DEFINE(CPU_X86_64, 1, [x86_64 target cpu])
+    target_cpu_bits=64
+else
+    if `perl -e "exit (\"$target_cpu\" =~ m/86$/i ? 0 : -1)"`; then
+        AC_DEFINE(CPU_X86, 1, [x86 target cpu])
+	target_cpu_bits=32
+    else
+        AC_MSG_ERROR(Target cpu not supported)
+    fi
+fi
+
+case "$sse" in
+    'auto')
+	AC_CHECK_FILE(/proc/cpuinfo,[have_cpuinfo=yes],[have_cpuinfo=no])
+	
+	AC_MSG_CHECKING(for sse support)
+	
+	if test "$have_cpuinfo" == "yes"; then
+	    if test `egrep -c '^flags.* sse( |$)' /proc/cpuinfo` -ge 1; then
+		sse=yes
+		AC_DEFINE(SUPPORT_SSE, 1, [Use sse])
+	    else
+		sse=no
+	    fi
+	    AC_MSG_RESULT($sse)
+	else
+	    AC_TRY_RUN([
+                    #include <stdlib.h>
+                    #include <signal.h>
+		    void catch() { exit(-1); }
+		    int main(void) {
+                        signal(SIGILL,catch);
+                        __asm__ __volatile__ ("xorps %%xmm0, %%xmm0"::
+			    :"memory");
+                        return 0;
+		    }
+		    ],
+		[sse=yes],
+		[sse=no])
+	    
+	    if test "$sse" == "yes"; then
+		AC_DEFINE(SUPPORT_SSE, 1, [Use sse])
+	    fi
+	    
+	    AC_MSG_RESULT($sse)
+	fi
+	;;
+    'yes')
+	AC_DEFINE(SUPPORT_SSE, 1, [Use sse])
+	;;
+    'no')
+	;;
+    *)
+	AC_MSG_ERROR(SSE must be auto, yes or no)
+	;;
+esac
+
+case "$granularity" in
+    'word')
+	;;
+    'obj')
+	if test "$mode" != 'enc'; then
+	    AC_MSG_ERROR(obj must use mode enc)
+	fi
+	
+	if test "$sse" != 'no'; then
+	    AC_MSG_ERROR(obj does not support sse)
+	fi
+	
+	if test "$target_cpu_bits" != 32; then
+	    AC_MSG_ERROR(obj only support 32 bits target machine)
+	fi
+	
+	AC_DEFINE(OBJ_STM, 1, [Granularity: obj])
+	;;
+    'objpo')
+	if test "$mode" != 'enc'; then
+	    AC_MSG_ERROR(objpo must use mode enc)
+	fi
+	
+	if test "$sse" != 'no'; then
+	    AC_MSG_ERROR(objpo does not support sse)
+	fi
+	
+	if test "$target_cpu_bits" != 32; then
+	    AC_MSG_ERROR(objpo only support 32 bits target machine)
+	fi
+	
+	AC_DEFINE(OBJ_STM, 1, [Granularity: obj])
+	AC_DEFINE(OBJ_STM_PO, 1, [Granularity: objpo])
+	;;
+    *)
+	AC_MSG_ERROR(Granularity must be word, obj or objpo)
+	;;
+esac
+
+if test "$handler" == "yes"; then
+    AC_DEFINE(USE_TX_HANDLER, 1, [Use handler])
+fi
+
+if test "$pre_alloc_handlers" == "yes"; then
+    AC_DEFINE(PRE_ALLOC_HANDLERS, 1, [Pre alloc handlers])
+fi
+
+AC_DEFINE_UNQUOTED(DEBUG_MODE, $debug_level, [Debug level])
+
+if test "$debug_level" != "0"; then
+    echo
+    echo "DEBUG LEVEL: $debug_level"
+    echo
+fi
+
+if test "$debug" == "yes"; then
+    DEBUG_FLAGS="$DEBUG_FLAGS -ggdb"
+    
+    echo
+    echo "DEBUG ENABLE"
+    echo
+fi
+
+if test "$tracing" == "yes"; then
+    AC_DEFINE(ENABLE_TRACE, 1, [Tracing])
+    
+    echo
+    echo "TRACING ENABLE"
+    echo
+fi
+
+if test "$profiling" == "yes"; then
+    DEBUG_FLAGS="$DEBUG_FLAGS -pg"
+    
+    echo
+    echo "PROFILING ENABLE"
+    echo
+fi
+
+ALLFLAGS="$DEBUG_FLAGS $ARCH_FLAGS $CFLAGS $PERF_FLAGS"
+CFLAGS=$ALLFLAGS
+
+RELEASE_SUFFIX="-$mode-$granularity-$target_cpu_bits"
+
+AC_SUBST(RELEASE_SUFFIX)
+
+AC_OUTPUT([
+	Makefile
+	src/Makefile
+    ])

@@ -1,0 +1,43 @@
+# --------------------------------------------------------------  
+# (C)Copyright 2001,2007,                                         
+# International Business Machines Corporation,                    
+# Sony Computer Entertainment, Incorporated,                      
+# Toshiba Corporation,                                            
+#                                                                 
+# All Rights Reserved.                                            
+# --------------------------------------------------------------  
+# PROLOG END TAG zYx                                              
+
+# This file contains definitions that are sometimes needed in advance
+# to process the Makefile
+
+########################################################################
+#                    	OS Definitions
+########################################################################
+
+SHELL			:= /bin/bash
+
+ifeq "$(findstring en_US,$(LANG))" "en_US"
+  # LANG=en_US* causes bash to misinterpret [a-z]* as [a-zA-Z]*
+  export LANG=C
+endif
+
+ifndef TERM
+  TERM			:= ansi
+endif
+
+ifndef USR_LOCAL
+  export USR_LOCAL	:= /usr/local
+endif
+
+ifndef CELL_TOP
+  CELL_TOP_buildutils	= $(dir $(filter %/make.header,$(MAKEFILE_LIST)))
+  export CELL_TOP	= $(shell cd $(CELL_TOP_buildutils)/.. && pwd)
+
+endif
+
+ifneq "$(MAKEFILE_LIST)" ""
+  include $(CELL_TOP)/buildutils/make.env
+endif
+
+__MAKE_HEADER__		:= 1

@@ -1,0 +1,188 @@
+#ifndef _tl_spu_h_
+#define _tl_spu_h_
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <assert.h>
+#include <sys/types.h>
+#include <stdint.h>
+#include <setjmp.h>
+
+
+#define MAX_OBJ_SIZE 16
+#define MAX_LIST_SIZE 1024
+#define MAX_LOCAL_LIST_SIZE 512
+#define LDLOCK(a) (*(a))
+
+typedef unsigned char byte;
+typedef int BitMap;
+typedef volatile unsigned long long vwLock;
+
+//extern volatile vwLock GClock[64];
+//volatile vwLock GClock[64] __attribute__ ((aligned(8)));
+
+typedef enum
+{
+	LOCKBIT = 1,
+	NULLVER = (int)0xFFFFFFF0,	// CONSIDER 0x1
+	NADA
+} ManifestContants;
+
+typedef enum
+{
+	TIDLE = 0,	// Non-transactional
+	TTXN = 1,	// Transactional mode
+	//TABORTING       = 3,        // aborting - abort pending
+	TABORTED = 5	// defunct - moribund txn
+	//TULTIMATE
+} Modes;
+
+/*Memory related*/
+#define COLOR         (128)
+#define _TABSZ (1<<20)  // = 1048576
+#define TABMSK        (_TABSZ-1)
+
+//log2 word size in bytes
+#define WORD_SIZE_LOG2  ((sizeof(void *) == 4) ? 2 : 3)
+//word size in bytes
+#define WORD_SIZE        (1<<WORD_SIZE_LOG2)
+#define WORD_MASK        (WORD_SIZE-1)
+
+//log2 line size in bytes
+#ifndef LINE_SIZE_LOG2
+#define LINE_SIZE_LOG2   WORD_SIZE_LOG2
+//#define LINE_SIZE_LOG2   (5)
+#endif
+//line size in bytes
+#define LINE_SIZE        (uintptr_t)(1<<LINE_SIZE_LOG2)
+#define LINE_BASE_MASK        (~(LINE_SIZE-1))
+#define LINE_OFFSET_MASK        (LINE_SIZE-1)
+#define LINE_BASE(a) (intptr_t*)(UNS(a)&LINE_BASE_MASK)
+#define LINE_OFFSET(a) (UNS(a)&LINE_OFFSET_MASK)
+
+//Word mode PSLOCK
+#define PSLOCK(a)      (vwLock*)(LockTab + (((UNS(a)+COLOR) >> LINE_SIZE_LOG2) & TABMSK))
+#define PSLOCKOFFSET(a) (((UNS(a)+COLOR) >> LINE_SIZE_LOG2) & TABMSK)
+
+
+// =====================> Generic Infrastructure
+
+#define DIM(A)      (sizeof(A)/sizeof((A)[0]))
+#define UNS(a)      ((uintptr_t)(a))
+#define CTASSERT(x) { int tag[1-(2*!(x))]; tag[0]=0; printf ("Tag @%X\n", (int)tag[0]); }
+//#define TRACE(nom)  (0)
+
+// Bloom Filter
+#define FILTERHASH(a)   ((UNS(a) >> 2) ^ (UNS(a) >> 5))
+#define FILTERBITS(a)   (1 << (FILTERHASH(a) & 0x1F))
+
+#define HIGH_32BITS 0xFFFFFFFF00000000ULL
+#define LOW_32BITS  0x00000000FFFFFFFFULL
+#define IS_LOCKED(x) ((x & LOCKBIT))
+#define IS_VERSION(x) (!IS_LOCKED(x))
+
+#define ADDR_2_VWLOCK(a) (UNS(a)|LOCKBIT)
+#define VWLOCK_2_ADDR(l) {ASSERT_DEBUG(IS_LOCKED(l)); l^LOCKBIT;}
+
+
+//LOCKTAB
+//static vwLock volatile LockTab[_TABSZ] __attribute__ ((aligned(8)));
+
+/*
+ * André's overpass the sigjmp
+ * */
+#define _JBLEN 50
+#define _JBTYPE __vector signed int
+typedef int sigjmp_buf[_JBLEN+2];
+///////////////////////////////////////////
+
+
+
+typedef struct _AVPair
+{	// read-set and write-set log entry
+	//    struct _AVPair * Next ;      // Next element in log
+	//    struct _AVPair * Prev ;      // Prev element in log
+
+	//intptr_t volatile *Addr;	// (Address,Value) pair
+	volatile unsigned long long Addr;
+
+	//    vwLock volatile * LockFor ;  // LockFor points to the vwLock covering Addr
+	unsigned long long ObjSize;
+	vwLock rdv;	// read-version @ time of 1st read - observed
+	byte Held;
+	// On CMT: Held=1 means lock is held.
+	// On ENC: Held=1 means value is on the undo log.
+	//struct _Thread *Owner;
+	unsigned long long Owner;
+#ifdef ENABLE_NESTING
+	unsigned int TxId;
+#endif
+	//    intptr_t Valu ;
+	//intptr_t Valu[WORDS_PER_LINE];
+	//void * ObjValu;
+	intptr_t ObjValu[MAX_OBJ_SIZE];
+	unsigned int useless;
+	//    intptr_t Valu[WORDS_PER_LINE]   __attribute__ ((aligned (LINE_SIZE)));
+	//    intptr_t *Valu;
+}AVPair __attribute__((aligned(128))) ;
+
+typedef struct _Log
+{
+	int CurrentList __attribute__((aligned(128))); //indicates size of List.
+	AVPair *Put;	// Insert position - cursor
+	AVPair *List __attribute__((aligned(128)));
+	BitMap BloomFilter;	// Address exclusion fast-path test
+}
+	Log __attribute__((aligned(128)));
+
+typedef struct _Tx
+{
+	Log rdSet;
+	Log wrSet;
+
+#ifndef DISABLE_LOCAL_VARS
+	Log LocalUndo;
+#endif
+
+	int volatile Mode;
+	sigjmp_buf OnFailure;
+
+	struct _Tx *upperTx;
+	struct _Tx *lowerTx;
+
+#ifdef ENABLE_NESTING
+	unsigned int TxId;
+#endif
+
+#ifdef USE_TX_HANDLER
+	//ThreadEnv *env;
+	ThreadHandlers *ths;
+#endif
+}
+	Tx;
+
+typedef struct{
+	unsigned long long userStruct;
+	unsigned long long txStruct;
+	vwLock rv;
+	unsigned long long lockTab;
+	unsigned long long wrSet;
+	unsigned long long rdSet;
+	unsigned long long wrSetPut;
+	unsigned long long rdSetPut;
+	unsigned long long Owner;
+	unsigned long long pointerToObjValu; //THIS? allign it and BANG
+	unsigned long long CurrentListwrSet;
+	unsigned long long CurrentListrdSet;
+} controlStruct_t __attribute__((aligned(128)));
+
+
+
+unsigned long long TxStart(long long int argp);
+void TxLoad(volatile *destination, long long int volatile address, int size);
+void TxStore(unsigned long long volatile address, intptr_t value);
+void TxCommit();
+void TxAbort();
+
+#endif

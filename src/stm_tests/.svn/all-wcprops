@@ -1,0 +1,41 @@
+K 25
+svn:wc:ra_dav:version-url
+V 33
+/svn/!svn/ver/164/trunk/stm_tests
+END
+g_list_stm_tl_spu.h
+K 25
+svn:wc:ra_dav:version-url
+V 52
+/svn/!svn/ver/67/trunk/stm_tests/g_list_stm_tl_spu.h
+END
+g_list_stm_tl.c
+K 25
+svn:wc:ra_dav:version-url
+V 49
+/svn/!svn/ver/113/trunk/stm_tests/g_list_stm_tl.c
+END
+g_list_stm_tl.h
+K 25
+svn:wc:ra_dav:version-url
+V 47
+/svn/!svn/ver/6/trunk/stm_tests/g_list_stm_tl.h
+END
+g_kv_harness.c
+K 25
+svn:wc:ra_dav:version-url
+V 47
+/svn/!svn/ver/92/trunk/stm_tests/g_kv_harness.c
+END
+g_list_stm_tl_spu.c
+K 25
+svn:wc:ra_dav:version-url
+V 53
+/svn/!svn/ver/164/trunk/stm_tests/g_list_stm_tl_spu.c
+END
+Makefile
+K 25
+svn:wc:ra_dav:version-url
+V 41
+/svn/!svn/ver/46/trunk/stm_tests/Makefile
+END

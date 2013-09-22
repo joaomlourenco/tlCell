@@ -1,0 +1,8 @@
+spu-gcc -Wall -g -c -o tl_spu.o -I/usr/lib/gcc/spu/4.1.1/include/ -I/usr/spu/include/ -I /opt/cell/sdk/usr/spu/include/ tl_spu.c
+ar rcs libtl_spu.a tl_spu.o
+
+spu-gcc -g -o spuCode -I ./tl_spu/ spuCode.c libtl_spu.a
+/usr/bin/ppu-embedspu -m64 spuCode spuCode spuCode_spu-embed64.o
+/usr/bin/ppu-ar -qcs spuCode.a spuCode_spu-embed64.o
+cp spuCode ../ppu/
+cp spuCode.a ../ppu/

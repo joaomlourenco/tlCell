@@ -1,0 +1,4 @@
+/usr/bin/ppu-gcc -g  -W -Wall -Winline   -I.  -I /usr/include -I /home/lopeici/1.0.2/src -I /opt/cell/sdk/usr/include -mabi=altivec -maltivec -O3 -c testePPC.c
+
+
+/usr/bin/ppu-gcc -g -o  testePPC  testePPC.o      -L/usr/lib64 -L/opt/cell/sdk/usr/lib64 -L /home/lopeici/CTL/CTLlib/lib/ -R/opt/cell/sdk/usr/lib64 ../spu/spuCode.a -lspe2 -lctl-cmt-word-64
